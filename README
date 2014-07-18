@@ -1,0 +1,224 @@
+irsync version 1.1 <irsync@r-fx.org>
+Copyright (C) 2010, Ryan MacDonald <ryan@r-fx.org>
+This program may be freely redistributed under the terms of the GNU GPL
+
+DESCRIPTION
+The irsync tool is an incremental wrapper for the rsync utility, though this
+is native-supported by rsync, the irsync tool provides convenience features.
+
+Features include:
+- traffic control (tc) shaping of outbound traffic for rate limiting
+- preservation of full backup with incremental snapshots
+- each incremental snapshot can be restored as a full point-in-time backup
+- hard link based snapshots to reduce disk usage
+- compatible with unmanaged storage space, all opertions are client side
+- optional local option for performing serverless backups (i.e: to backup disk)
+- auto-deletion of snapshots based on configurable age values
+- auto-generation of ssh public/private key pairs for irsync install
+- mysql backups through mysqldump with non-locking fast dumps & gzip compression
+- mysql backups through mysqlhotcopy of raw mysql database (var/lib/mysql/db/*)
+- mysql backups flush to disk of all open tables for consistent backups
+- mysql backups stored as full and point-in-time backups of hotcopy images
+
+STORAGE METHOD:
+
+The irsync storage logic is based on hardlinks to create point-in-time backups
+of full incremental backups. On execution rsync creates a full backup of defined
+paths then the 'cp' tool is used to create a hardlinked copy of data. Upon the
+next rsync run against the full backup path, any data that has been created, 
+deleted or modified will overwrite the existing data in the storage path 
+thereby breaking hard links and creating a point-in-time backup of changed data.
+
+The path structure is as follows:
+STORAGE_PATH/HOSTNAME.FULL
+STORAGE_PATH/HOSTNAME.FULL/MYSQLHOTCOPY
+STORAGE_PATH/HOSTNAME.FULL/MYSQLDUMP
+STORAGE_PATH/HOSTNAME.SNAPS/DATESTAMP
+
+The point-in-time backups which are restorable as full backups are stored in
+the .SNAPS directory, these are rotated off for deletion based on the max age
+value in conf.irsync using find's mtime option piped to rm.
+
+A common misconception is that deleting a hard link will delete the source data
+but this is not the case. When an rm is run on hardlink pointers, the number of
+links is checked and the data is only deleted when links reaches 0.
+
+To demonstrate how the backups work on the storage server we can look at the below
+storage layout details to see how the snapshots and full image get populated.
+
+The full image synced data with size and # of files:
+# ls freedom.lan.full/
+etc  home  local  root  var mysqldump  mysqlhotcopy
+
+# du -sh freedom.lan.full/
+1.9G    freedom.lan.full
+
+# find freedom.lan.full | wc -l
+17911
+
+Now lets assume we have run three iterations of irsync to date, the snapshots
+path would look something like this:
+
+# ls freedom.lan.snaps/
+2010-02-19.202026 2010-02-20.202718 2010-02-21.191503
+
+# ls 2010-02-21.191503/
+etc  home  local  root  var mysqldump  mysqlhotcopy
+
+# du -shc *
+12M    2010-02-19.202026
+133M   2010-02-20.202718
+275M   2010-02-21.191503
+
+# for i in `ls`; do find $i | wc -l; done
+17819  2010-02-19.202026
+18416  2010-02-20.202718
+18227  2010-02-21.191503
+
+So what does this all translate into? as we can see our full backup is 1.9G in
+size with 17.9k files then subsequent backups have synced in changed data only
+with the 2010-02-19.202026 image having 12M of changed data and an offset of 92
+fewer files. Although we capture the changed data in the 02-19 snap, we also
+have all our original data as indicated by the file counts but without having
+the space overhead of duplicating the data. 
+
+This is done by hard linking to the full image for any unchanged data, on
+subsequent irsync runs when new changed data is synced in, it breaks the hard
+links in the snapshots which leave behind a copy of the original data in its
+previous state. This method of point-in-time incremental backups allows for
+the easy retention of changed data, with minimal space usage while having a
+logical backup layout that is fully restorable from each individual snapshot
+and compatible with any utility as hard links are treated just like regular
+files and directories.
+
+EXAMPLE SCENARIO:
+Local networked Linux workstation requires backups stored local on a backup
+disk and remote to an unmanaged backup space. The local networks bandwidth is
+limited so outbound flows need to be limited to prevent incapacitating the
+network.
+
+# store to local backup disk
+irsync --local --backup-file /etc/paths.irsync --storage-path /backup
+
+# store to remote and limit outgoing traffic to 512kbit/s 
+irsync --remote backuphost.com --rate-limit 512kbit --rate-dev eth0
+
+Any combination of command line options can be used for customizing backups,
+all options which are not provided on the command line derive there values
+from conf.irsync.
+
+CONFIGURATION:
+
+see /usr/local/irsync/conf.irsync
+
+USAGE:
+
+irsync version 1.1 http://www.rfxn.com <irsync@rfxn.org>
+This program may be freely redistributed under the terms of the GNU GPL
+
+usage irsync [-lrbxgsm] [--help] [--ssh-user] [--ssh-port] [--ssh-key]
+[--mysql-dump] [--mysql-hotcopy] [--mysql-dump-gz] [--mysql-flush]
+[--mysql-pass] [--mysql-tmpdir] [--rate-limit] [--rate-dev] [--rate-ip]
+
+irsync [ OPTIONS ]
+    -l --local
+
+    -r --remote HOST
+        Perform backups to remote backup server as configured in
+        conf.irsync. An optional HOST can be provided in FQDN or IP
+        format that will override conf.irsync defined backup_host.
+
+    -b --backup-file FILE
+        Path to backup list file. This file contains a line-separated
+        list of the local paths which irsync will backup. This option
+        will override conf.irsync defined backup_file.
+        [ FILE LIST ITEMS SHOULD CONTAIN NO TRAILING SLASHES ]
+
+    -x --exclude-file FILE
+        Path to backup exclude list file. This file contains a line-
+        separated list of local paths that irsync will exclude from
+        backups. This option will override conf.irsync defined
+        exclude_file.
+        [ FILE LIST ITEMS SHOULD CONTAIN NO TRAILING SLASHES ]
+
+    -g --storage-path PATH
+        Path to which backups are stored. This option will override
+        conf.irsync defined backup_storage.
+
+    -s --snapdays
+        The number of days to retain incremental backup snapshots.
+
+    --ssh-user USER
+        The remote receiving user for backups, this user must have
+        write access to the storage path (backup_storage). This option
+        will override the conf.irsync defined ssh_user.
+
+    --ssh-port NUMBER
+        The remote receiving ssh port number for backups. This option
+        will override the conf.irsync defined ssh_port.
+
+    --ssh-key FILE
+        The local private ssh key file for remote backups. This option
+        will override the conf.irsync defined ssh_key.
+
+    -m --mysql-only
+        Only perform mysql backups, no file system backups will be
+        performed. This option requires that mysql_hotcopy or
+        mysql_dump be set in conf.irsync or the respective usage
+        flags set.
+
+    --mysql-dump
+        The mysql backups will perform a mysqldump operation on all
+        local databases. This option overrides the conf.irsync defined
+        mysql_dump.
+
+    --mysql-hotcopy
+        The mysql backups will perform a mysqlhotcopy operation on
+        all local databases. This option overrides the conf.irsync
+        defined mysql_hotcopy.
+
+    --mysql-dump-gz
+        The mysql backups will compress output of mysqldump operations.
+        This option overrides the conf.irsync mysql_dump_gz.
+
+    --mysql-flush
+        This will force all currently opened tables to gracefully close
+        and write to disk before mysql backups are performed. This option
+        will override the conf.irsync defined mysql_flush.
+
+    --mysql-pass PASS
+        This is the mysql root users password which is used for mysqldump
+        backup operations. This option overrides the conf.irsync defined
+        mysql_pass; the presence of ~/.my.cnf has precedence on defining
+        the mysql root password.
+
+    --mysql-tmpdir PATH
+        The temporary path that mysql backups are stored. This path must
+        have greater than the mysql install size of available space. This
+        option overrides the conf.irsync defined mysql_tmpdir.
+
+    --rate-limit kbit/s
+        Use traffic control shapping to rate limit outgoing traffic to the
+        backup_host. This should be expressed in kbit/s or mbit/s, this
+        option overrides conf.irsync defined rate_limit.
+
+    --rate-dev DEVICE
+        The ethernet device that outgoing rate limited shaping will apply
+        against. This option overrides the conf.irsync defined rate_dev.
+
+    --rate-ip IP
+        The destination IP address for outgoing rate limit shaping. This
+        option MUST be an IP address and should relate to backup_host.
+
+    -h --help
+        The usage help summary, you are reading it.
+
+USAGE:
+
+irsync-rate [--start|--stop] [ETHDEV] [RATE LIMIT] [RATE HOST]
+-s --start     enable rate limits with defaults defined in conf.irsync
+-x --stop      disable rate limits, deletes the root qdisc
+ETHDEV overrides defined outbound network interface
+RATELIMIT overrides defined rate limit, values in form of: 1024kbit or 1Mbit
+RATEHOST overrides defined host to rate limit traffic towards
+e.g: irsync-rate --start eth0 5Mbit 222.111.222.111

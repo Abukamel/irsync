@@ -1,0 +1,85 @@
+#!/bin/bash
+##
+# irsync version 1.1 <irsync@r-fx.org>
+# Copyright (C) 2010, Ryan MacDonald <ryan@r-fx.org>
+# This program may be freely redistributed under the terms of the GNU GPL
+##
+
+##
+# [GLOBALS]
+# see 'irsync --help' for further usage details
+##
+
+## INSTALLATION PATH: the installation path of irsync
+install_path=/usr/local/irsync
+
+## BACKUP SERVER: IP or FQDN of the receiving backup server
+backup_host=
+
+## BACKUP STORAGE PATH: the storage path for backups
+backup_storage=/data/irsync
+
+## BACKUP PATHS FILE: contains line spaced list of paths to backup
+## [ NO TRAILING SLASHES IN FILE LIST ITEMS ]
+backup_file="$install_path/paths.irsync"
+
+## BACKUP EXCLUDES FILE: contains line spaced list of paths to exclude on backup
+## [ NO TRAILING SLASHES IN FILE LIST ITEMS ]
+exclude_file="$install_path/excludes.irsync"
+
+## BACKUP SNAPDAYS: incremental snapshots are deleted after N days
+## e.g: run irsync weekly, preserve 4 weeks of backups; snapdays=4*7=28
+backup_snapdays="14"
+
+## BACKUP SERVER SSH USER
+ssh_user=irsync
+
+## BACKUP SERVER SSH PORT
+ssh_port=22
+
+## BACKUP SERVER PRIVATE KEY: generated on irsync first run, copy contents of
+## id_dsa.pub to backup_host (userhome/.ssh/authorized_keys) -- ssh_user must
+## have write access to backup_stor path
+ssh_key="$install_path/ssh/id_dsa"
+
+## IRSYNC TIMEOUT: irsync runs will timeout after this amount of time (secs) 
+timeout=10800
+
+##
+# [MYSQL]
+##
+
+## MYSQL HOTCOPY: creates backup of raw database files (/var/lib/mysql/db)
+mysql_hotcopy=0
+
+## MYSQL DUMP: creates SQL text files of database contents for imports
+mysql_dump=0
+
+## MYSQL DUMP GZIP: gzip compresses mysqldump output
+mysql_dump_gz=1
+
+## MYSQL FLUSH: forces all tables to close/write to disk before backup
+mysql_flush=1
+
+## MYSQL ROOT PASS: mysql root login required for dumps, if ~/.my.cnf is
+## present then password will be extracted from it.
+mysql_pass=""
+
+## MYSQL TMPDIR: required as hotcopies/dumps over network may lock db's for
+## unreasonable times, this path must have greater than mysql install size
+## of available space
+mysql_tmpdir=/home/.tmp
+
+##
+# [RATE LIMIT]
+# see 'irsync-rate --help' for further usage details
+##
+
+## ENABLE RATE LIMIT: call irsync-rate before remote syncs and disables on exit
+rate_before_rsync=0
+## INTERFACE: backup network interface
+rate_dev=eth0
+## BACKUP SERVER: rate limit outgoing traffic to this server
+rate_host=$backup_host
+## BANDWIDTH RATE LIMIT: kbit or Mbit - e.g: 5Mbit
+rate_limit="512kbit"

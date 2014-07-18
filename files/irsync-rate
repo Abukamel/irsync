@@ -1,0 +1,51 @@
+#!/bin/bash
+##
+# rsync version 1.1 <irsync@r-fx.org>
+# Copyright (C) 2010, Ryan MacDonald <ryan@r-fx.org>
+# This program may be freely redistributed under the terms of the GNU GPL
+##
+
+install_path="/usr/local/irsync"
+cnf=$install_path/conf.irsync
+
+if [ -f "$cnf" ]; then
+	. $cnf
+else
+	echo "could not find config file ($cnf), aborting."
+	exit
+fi
+
+case "$1" in
+	start|--start|-s)
+		if [ "$2" ]; then
+			rate_dev="$2"
+		fi
+		if [ "$3" ]; then
+			rate_limit="$3"
+		fi
+		if [ "$4" ]; then
+			rate_host="$4"
+		fi
+		/sbin/tc qdisc del dev $rate_dev root >> /dev/null 2>&1
+		/sbin/tc qdisc add dev $rate_dev root handle 1: cbq avpkt 1000 bandwidth 100mbit 
+		/sbin/tc class add dev $rate_dev parent 1: classid 1:1 cbq rate $rate_limit allot 1500 prio 5 bounded isolated 
+		/sbin/tc filter add dev $rate_dev parent 1: protocol ip prio 16 u32 match ip dst $rate_host flowid 1:1
+		/sbin/tc filter show dev $rate_dev
+	;;
+	stop|--stop|-x)
+	        /sbin/tc qdisc del dev $rate_dev root >> /dev/null 2>&1
+        	/sbin/tc filter show dev $rate_dev
+	;;
+	*)
+	echo "irsync version 1.1 <irsync@r-fx.org>"
+	echo "This program may be freely redistributed under the terms of the GNU GPL"
+	echo ""
+	echo "usage $0 [--start|--stop] [ETHDEV] [RATE LIMIT] [RATE HOST]"
+	echo "-s --start     enable rate limits with defaults defined in conf.irsync"
+	echo "-x --stop      disable rate limits, deletes the root qdisc"
+	echo "ETHDEV overrides defined outbound network interface"
+	echo "RATELIMIT overrides defined rate limit, values in form of: 1024kbit or 1Mbit"
+	echo "RATEHOST overrides defined host to rate limit traffic towards"
+	echo "e.g: $0 --start eth0 5Mbit 222.111.222.111" 
+esac
+exit 0

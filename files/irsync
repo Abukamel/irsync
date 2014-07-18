@@ -1,0 +1,620 @@
+#!/bin/bash
+##
+# rsync version 1.1 <irsync@r-fx.org>
+# Copyright (C) 2010, Ryan MacDonald <ryan@r-fx.org>
+# This program may be freely redistributed under the terms of the GNU GPL
+##
+
+install_path=/usr/local/irsync
+cnf=$install_path/conf.irsync
+if [ -f "$cnf" ]; then
+	. $cnf
+else
+	echo "could not find config file ($cnf), aborting."
+	exit
+fi
+
+maxload=5
+sleeptime=30
+
+# Setcolor variables for output
+SETCOLOR_SUCCESS="echo -en \\033[1;32m"
+SETCOLOR_FAILURE="echo -en \\033[1;31m"
+SETCOLOR_NORMAL="echo -en \\033[0;39m"
+SET_FIN="echo -e \\r"
+
+# Space XX colums before running our echo_status functions
+RES_COL="60"
+MOVE_TO_COL="echo -en \\033[${RES_COL}G"
+
+echo_completed() {
+  $MOVE_TO_COL
+  echo -n "[ "
+  $SETCOLOR_SUCCESS
+  echo -n $"COMPLETED"
+  $SETCOLOR_NORMAL
+  echo -n " ]"
+  $SET_FIN
+}
+
+echo_fail() {
+  $MOVE_TO_COL
+  echo -n "[ "
+  $SETCOLOR_FAILURE
+  echo -n $"FAILED"
+  $SETCOLOR_NORMAL
+  echo -n " ]"
+  $SET_FIN
+}
+
+header() {
+VER=1.1
+cat >&2 <<EO
+irsync version $VER http://www.rfxn.com <irsync@rfxn.org>
+This program may be freely redistributed under the terms of the GNU GPL
+
+EO
+}
+
+helpinfo() {
+cat <<EOHELP
+USAGE irsync [ OPTIONS ] 
+    -l --local
+
+    -r --remote HOST
+        Perform backups to remote backup server as configured in
+        conf.irsync. An optional HOST can be provided in FQDN or IP
+        format that will override conf.irsync defined backup_host.
+
+    -b --backup-file FILE
+        Path to backup list file. This file contains a line-separated
+        list of the local paths which irsync will backup. This option
+        will override conf.irsync defined backup_file.
+        [ FILE LIST ITEMS SHOULD CONTAIN NO TRAILING SLASHES ]
+
+    -c --config-file FILE
+        Path to configuration file (e.g.: /usr/local/irsync/conf.irsync)
+
+    -x --exclude-file FILE
+        Path to backup exclude list file. This file contains a line-
+        separated list of local paths that irsync will exclude from
+        backups. This option will override conf.irsync defined
+        exclude_file.
+        [ FILE LIST ITEMS SHOULD CONTAIN NO TRAILING SLASHES ]
+
+    -g --storage-path PATH
+        Path to which backups are stored. This option will override
+        conf.irsync defined backup_storage.
+
+    -s --snapdays
+        The number of days to retain incremental backup snapshots. 
+
+    --ssh-user USER
+        The remote receiving user for backups, this user must have
+        write access to the storage path (backup_storage). This option
+        will override the conf.irsync defined ssh_user.
+
+    --ssh-port NUMBER
+        The remote receiving ssh port number for backups. This option
+        will override the conf.irsync defined ssh_port.
+
+    --ssh-key FILE
+        The local private ssh key file for remote backups. This option
+        will override the conf.irsync defined ssh_key.
+
+    -m --mysql-only
+        Only perform mysql backups, no file system backups will be
+        performed. This option requires that mysql_hotcopy or
+        mysql_dump be set in conf.irsync or the respective usage
+        flags set.
+
+    --mysql-dump
+        The mysql backups will perform a mysqldump operation on all
+        local databases. This option overrides the conf.irsync defined
+        mysql_dump.
+
+    --mysql-hotcopy
+        The mysql backups will perform a mysqlhotcopy operation on
+        all local databases. This option overrides the conf.irsync
+        defined mysql_hotcopy.
+
+    --mysql-dump-gz
+        The mysql backups will compress output of mysqldump operations.
+        This option overrides the conf.irsync mysql_dump_gz.
+
+    --mysql-flush
+        This will force all currently opened tables to gracefully close
+        and write to disk before mysql backups are performed. This option
+        will override the conf.irsync defined mysql_flush.
+
+    --mysql-pass PASS
+        This is the mysql root users password which is used for mysqldump
+        backup operations. This option overrides the conf.irsync defined
+        mysql_pass; the presence of ~/.my.cnf has precedence on defining
+        the mysql root password.
+
+    --mysql-tmpdir PATH
+        The temporary path that mysql backups are stored. This path must
+        have greater than the mysql install size of available space. This
+        option overrides the conf.irsync defined mysql_tmpdir.
+
+    --rate-limit kbit/s
+        Use traffic control shapping to rate limit outgoing traffic to the
+        backup_host. This should be expressed in kbit/s or mbit/s, this
+        option overrides conf.irsync defined rate_limit.
+
+    --rate-dev DEVICE
+        The ethernet device that outgoing rate limited shaping will apply
+        against. This option overrides the conf.irsync defined rate_dev.
+
+    --rate-ip IP
+        The destination IP address for outgoing rate limit shaping. This
+        option MUST be an IP address and should relate to backup_host.
+
+    -h --help
+        The usage help summary, you are reading it.
+
+EOHELP
+}
+
+helpusage() {
+	echo "usage irsync [-lrbxgsm] [--help] [--ssh-user] [--ssh-port] [--ssh-key]"
+	echo "[--mysql-dump] [--mysql-hotcopy] [--mysql-dump-gz] [--mysql-flush]"
+	echo "[--mysql-pass] [--mysql-tmpdir] [--rate-limit] [--rate-dev] [--rate-ip]"
+}
+
+irsync_lock() {
+lock=$install_path/.lock
+curs=`date +"%s"`
+	if [ ! -f "$lock" ]; then
+		echo "$curs" > $lock
+		echo "$$" > $lock.pid
+	else
+		olds=`cat $lock`
+		diff=$[curs-olds]
+		if [ "$diff" -gt "$timeout" ]; then
+			echo "irsync subsys locked, run time greater than ${timeout}s, killing..."
+			kill -9 $(cat $lock.pid) >> /dev/null 2>&1
+			killall -9 rsync >> /dev/null 2>&1
+	                echo "$curs" > $lock
+	                echo "$$" > $lock.pid
+		else
+			echo_fail
+                        echo "irsync subsys locked, pid $(cat $lock.pid) running for ${diff}s, aborting."
+			exit
+		fi
+	fi
+}
+
+trap trap_fin 2
+trap_fin() {
+	echo_fail
+	echo "user interrupt, aborting..."
+	irsync_pid=`cat $lock.pid`
+	rm -f $lock $lock.pid
+	$install_path/irsync-rate --stop
+	killall -9 rsync >> /dev/null 2>&1
+	kill -9 $irsync_pid >> /dev/null 2>&1
+	exit
+}
+
+irsync_mysql() {
+if [ ! "$mysql_hotcopy" == "1" ] && [ ! "$mysql_dump" == "1" ]; then
+	sqlskip=1
+fi
+
+if [ "$mysql_hotcopy" == "1" ] || [ "$mysql_dump" == "1" ]; then
+	if [ -f "/root/.my.cnf" ]; then
+		mysql_user=root
+		mysql_pass=`cat /root/.my.cnf | grep pass | tr "='\"" ' ' | awk '{print$2}'`
+	fi
+
+	if [ "$mysql_pass" == "" ] || [ "$mysql_user" == "" ]; then
+		echo "could not find mysql login but mysql backups enabled, skipping mysql backups."
+		sqlskip=1
+	fi
+	RETVAL=0
+	mysql -u root -p$mysql_pass -e"FLUSH TABLES;"
+	RETVAL=$?
+	if [ ! "$RETVAL" = "0" ]; then
+		echo "found mysql login but could not execute command, bad login?, skipping mysql backups."
+		sqlskip=1
+	fi
+	dblist=`mysql -u root -p$mysql_pass -e'show databases' | cut -f2 | grep -vw Database`
+fi
+
+if [ "$mysql_hotcopy" == "1" ] && [ ! "$sqlskip" == "1" ]; then
+	path_mhc=$mysql_tmpdir/mysqlhotcopy
+	rm -rf $path_mhc
+	mkdir -p $path_mhc
+	for db in $dblist; do
+		mkdir -p $path_mhc/$db
+		/bin/nice -n 19 mysqlhotcopy -u root -p $mysql_pass --tmpdir=$mysql_tmpdir --method=cp $db $path_mhc/$db
+        	loadavg=`cat /proc/loadavg  | tr '.' ' ' | awk '{print$1}'`
+	        sleep 5
+	        if [ "$loadavg" -gt "$maxload" ]; then
+        	        sleep $sleeptime
+	        fi
+	done
+	backup_paths="$backup_paths $path_mhc"
+fi
+
+if [ "$mysql_dump" == "1" ] && [ ! "$sqlskip" == "1" ]; then
+	path_md=$mysql_tmpdir/mysqldump
+	rm -rf $path_md
+	mkdir -p $path_md
+	for db in $dblist; do
+		/bin/nice -n 19 mysqldump -u root -p$mysql_pass --skip-opt --quick --set-charset --disable-keys --extended-insert --create-options --add-drop-table $db > $path_md/$db.sql
+		if [ "$mysql_dump_gz" == "1" ]; then
+			gzip --fast $path_md/$db.sql
+		fi
+		loadavg=`cat /proc/loadavg  | tr '.' ' ' | awk '{print$1}'`
+		sleep 5
+		if [ "$loadavg" -gt "$maxload" ]; then
+			sleep $sleeptime
+		fi
+	done
+	backup_paths="$backup_paths $path_md"
+fi
+}
+###
+ssh_keycheck() {
+if [ ! -f "$ssh_key.pub" ]; then
+	cat >&2 <<EO
+The ssh key files could not be found, they will now be generated...
+[ hit return through all input prompts ] 
+EO
+	sleep 2
+	echo
+	ssh-keygen -t dsa -b 1024 -f $ssh_key
+	echo 
+	cat >&2 <<EO
+The contents of '$ssh_key.pub' must be appended to .ssh/authorized_keys 
+under user '$user' home directory on the backup host '$backup_host'.
+
+For successful completion of remote backups, the user '$user' should have
+write access to '$backup_storage'.
+EO
+	exit
+fi
+}
+###
+irsync_local() {
+	lohost=`hostname`
+	dstamp=`date +'%Y-%m-%d.%H%M%S'`
+
+	mkdir -p $backup_storage/$lohost.full
+	mkdir -p $backup_storage/$lohost.snaps
+
+	/bin/nice -n 19 rsync -qaHx --timeout=600 --ignore-errors --numeric-ids --delete --exclude-from="$exclude_file" --delete-excluded $backup_paths $backup_storage/$lohost.full >> /dev/null 2>&1
+	touch -m $backup_storage/$lohost.full
+	cp -al $backup_storage/$lohost.full $backup_storage/$lohost.snaps/$dstamp
+	tdate=`date +"%Y%m%d%H%M"`
+	touch -t $tdate $backup_storage/$lohost.snaps/$dstamp
+
+	find $backup_storage/$lohost.snaps -maxdepth 1 -mtime +$backup_snapdays -type d -print0 | xargs -0 rm -rf
+}
+###
+irsync_remote() {
+	lohost=`hostname`
+	dstamp=`date +'%Y-%m-%d.%H%M%S'`
+
+	if [ "$rate_before_rsync" == "1" ]; then
+		if [ -z "$rate_host" ]; then
+			rate_host=$backup_host
+		fi
+		$install_path/irsync-rate --start $rate_dev $rate_limit $rate_host >> /dev/null 2>&1
+	fi
+
+	ssh -p $ssh_port -i $ssh_key -o Compression=no -o StrictHostKeyChecking=no -x $ssh_user@$backup_host "mkdir -p $backup_storage/$lohost.full"
+	ssh -p $ssh_port -i $ssh_key -o Compression=no -o StrictHostKeyChecking=no -x $ssh_user@$backup_host "mkdir -p $backup_storage/$lohost.snaps"
+	/bin/nice -n 19 rsync -qaHx --timeout=600 --ignore-errors --numeric-ids --delete --exclude-from="$exclude_file" --delete-excluded \
+        -e "ssh -p $ssh_port -i $ssh_key -c arcfour -o Compression=no -o StrictHostKeyChecking=no -x" \
+        $backup_paths $ssh_user@$backup_host:$backup_storage/$lohost.full >> /dev/null 2>&1
+
+	ssh -p $ssh_port -i $ssh_key -o Compression=no -o StrictHostKeyChecking=no -x $ssh_user@$backup_host \
+        "cp -al $backup_storage/$lohost.full $backup_storage/$lohost.snaps/$dstamp"
+
+        tdate=`date +"%Y%m%d%H%M"`
+        ssh -p $ssh_port -i $ssh_key -o Compression=no -o StrictHostKeyChecking=no -x $ssh_user@$backup_host \
+        "touch -t $tdate $backup_storage/$lohost.snaps/$dstamp"
+
+	ssh -p $ssh_port -i $ssh_key -o Compression=no -o StrictHostKeyChecking=no -x $ssh_user@$backup_host \
+        "find $backup_storage/$lohost.snaps -maxdepth 1 -mtime +$backup_snapdays -type d -print0 | xargs -0 rm -rf"
+
+	if [ "$rate_before_rsync" == "1" ]; then
+		$install_path/irsync-rate --stop >> /dev/null 2>&1
+	fi
+}
+###
+
+if [ -z "$1" ]; then
+	header
+	helpusage
+else
+ while [ -n "$1" ]; do
+ case "$1" in
+	--local|-l)
+		local=1
+
+	;;
+
+	--remote|-r)
+		shift
+		remote=1
+		if [ ! -z "$1" ]; then
+			backup_host="$1"
+		fi
+	;;
+
+	--backup-file|-b)
+		shift
+		if [ ! -z "$1" ]; then
+                 if [ -f "$1" ]; then
+			backup_file="$1"
+		 else
+			header
+			echo "--backup-file: $1 does not exist"
+			exit
+		 fi
+		else
+			header
+			echo "--backup-file: requires an option, see --help"
+			exit
+		fi
+	;;
+
+	--exclude-file|-x)
+		shift
+		if [ ! -z "$1" ]; then
+                 if [ -f "$1" ]; then
+			exclude_file="$1"
+		 else
+			header
+			echo "--exclude-file: $1 does not exist"
+			exit
+		 fi
+		else
+			header
+			echo "--exclude-file: requires an option, see --help"
+			exit
+		fi
+	;;
+
+        --config-file|-c)
+                shift
+                if [ ! -z "$1" ]; then
+                 if [ -f "$1" ]; then
+                        . "$1"
+                 else
+                        header
+                        echo "--config-file: $1 does not exist"
+                        exit
+                 fi
+                else
+                        header
+                        echo "--config-file: requires an option, see --help"
+                        exit
+                fi
+        ;;
+
+
+	--storage-path|-g)
+		shift
+		if [ -z "$1" ]; then
+			header
+			echo "--storage-path: requires an option, see --help"
+			exit
+		else
+                        backup_storage="$1"
+		fi
+	;;
+
+	--snapdays|-s)
+		shift
+		if [ ! -z "$1" ]; then
+			backup_snapdays="$1"
+		else
+			header
+			echo "--snapdays: requires an option, see --help"
+			exit
+		fi
+	;;
+
+        --ssh-user)
+                shift
+                if [ ! -z "$1" ]; then
+                        ssh_user="$1"
+                else
+                        header
+                        echo "--ssh-user: requires an option, see --help"
+			exit
+                fi
+        ;;
+
+        --ssh-port)
+                shift
+                if [ ! -z "$1" ]; then
+                        ssh_port="$1"
+                else
+                        header
+                        echo "--ssh-port: requires an option, see --help"
+			exit
+                fi
+        ;;
+
+        --ssh-key)
+                shift
+                if [ ! -z "$1" ]; then
+                 if [ -f "$1" ]; then
+                        ssh_key="$1"
+                 else
+                        header
+                        echo "--ssh-key: $1 does not exist or is not a file"
+			exit
+                 fi
+                else
+                        header
+                        echo "--ssh-key: requires an option, see --help"
+			exit
+                fi
+        ;;
+
+        --mysql-only|-m)
+		mysql_only=1
+        ;;
+
+        --mysql-dump)
+		mysql_dump=1
+        ;;
+
+        --mysql-hotcopy)
+		mysql_hotcopy=1
+        ;;
+
+        --mysql-dump-gz)
+		mysql_dump_gz=1
+        ;;
+
+        --mysql-flush)
+		mysql_flush=1
+        ;;
+
+        --mysql-pass)
+                shift
+                if [ ! -z "$1" ]; then
+                        mysql_pass="$1"
+                else
+                        header
+                        echo "--mysql-pass: requires an option, see --help"
+			exit
+                fi
+        ;;
+
+        --mysql-tmpdir)
+                shift
+                if [ ! -z "$1" ]; then
+                 if [ -d "$1" ]; then
+                        mysql_tmpdir="$1"
+                 else
+                        header
+                        echo "--mysql-tmpdir: $1 does not exist or is not a directory"
+			exit
+                 fi
+                else
+                        header
+                        echo "--mysql-tmpdir: requires an option, see --help"
+			exit
+                fi
+        ;;
+
+        --rate-limit)
+                shift
+                if [ ! -z "$1" ]; then
+			rate_before_rsync="1"
+                        rate_limit="$1"
+                else
+                        header
+                        echo "--rate-limit: requires an option, see --help"
+			exit
+                fi
+        ;;
+
+        --rate-dev)
+                shift
+                if [ ! -z "$1" ]; then
+			rate_before_rsync="1"
+                        rate_dev="$1"
+                else
+                        header
+                        echo "--rate-dev: requires an option, see --help"
+			exit
+                fi
+        ;;
+
+        --rate-ip)
+                shift
+                if [ ! -z "$1" ]; then
+			rate_before_rsync="1"
+                        rate_host="$1"
+                else
+                        header
+                        echo "--rate-ip: requires an option, see --help"
+			exit
+                fi
+        ;;
+
+	--help|-h)
+		header
+		helpinfo
+		exit
+	;;
+
+	*)
+	header
+	helpusage
+ esac
+ shift
+ done
+fi
+
+if [ -z "$local" ] && [ -z "$remote" ]; then
+	echo ""
+	echo "error: one of --local or --remote must be declared, see --help"
+	exit
+elif [ "$local" == "1" ] && [ "$remote" == "1" ]; then
+	header
+	helpusage
+	echo
+	echo "error: only one of --local or --remote can be declared, see --help"
+	exit
+elif [ "$local" == "1" ]; then
+	header
+        if [ ! -d "$backup_storage" ]; then
+            echo "--storage-path: $backup_storage does not exist or is not a directory"
+            exit
+        fi
+	echo -n " Performing subsys check: "
+	irsync_lock
+	echo_completed
+	echo -n " Performing mysql prerun: "
+	irsync_mysql
+	if [ "$mysql_only" == "1" ]; then
+		backup_paths="$mysql_tmpdir/mysqlhotcopy $mysql_tmpdir/mysqldump"
+	else
+        	backup_paths=`cat $backup_file | tr ',' ' ' | tr '\n' ' '`
+                backup_paths="$backup_paths $mysql_tmpdir/mysqlhotcopy $mysql_tmpdir/mysqldump"
+	fi
+	echo_completed
+	echo -n " Performing local backup: "
+	irsync_local
+	echo_completed
+	echo -n " Performing cleanup: " 
+	rm -rf $mysql_tmpdir/mysqlhotcopy
+	rm -rf $mysql_tmpdir/mysqldump
+	rm -f $lock $lock.pid
+	echo_completed
+	exit
+elif [ "$remote" == "1" ]; then
+	echo -n " Performing subsys check: "
+        irsync_lock
+	echo_completed
+	echo -n " Performing mysql prerun: "
+        irsync_mysql
+        if [ "$mysql_only" == "1" ]; then
+                backup_paths="$mysql_tmpdir/mysqlhotcopy $mysql_tmpdir/mysqldump"
+	else
+        	backup_paths=`cat $backup_file | tr ',' ' ' | tr '\n' ' '`
+                backup_paths="$backup_paths $mysql_tmpdir/mysqlhotcopy $mysql_tmpdir/mysqldump"
+        fi
+	echo_completed
+	echo -n " Performing remote backup: "
+        irsync_remote
+	echo_completed
+	echo -n " Performing cleanup: "
+        rm -rf $mysql_tmpdir/mysqlhotcopy
+        rm -rf $mysql_tmpdir/mysqldump
+	rm -f $lock $lock.pid
+	echo_completed
+	exit
+fi
