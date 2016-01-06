@@ -229,7 +229,7 @@ if [ "$mysql_hotcopy" == "1" ] && [ ! "$sqlskip" == "1" ]; then
 	mkdir -p $path_mhc
 	for db in $dblist; do
 		mkdir -p $path_mhc/$db
-		/bin/nice -n 19 mysqlhotcopy -u root -p $mysql_pass --tmpdir=$mysql_tmpdir --method=cp $db $path_mhc/$db
+		nice -n 19 mysqlhotcopy -u root -p $mysql_pass --tmpdir=$mysql_tmpdir --method=cp $db $path_mhc/$db
         	loadavg=`cat /proc/loadavg  | tr '.' ' ' | awk '{print$1}'`
 	        sleep 5
 	        if [ "$loadavg" -gt "$maxload" ]; then
@@ -244,7 +244,7 @@ if [ "$mysql_dump" == "1" ] && [ ! "$sqlskip" == "1" ]; then
 	rm -rf $path_md
 	mkdir -p $path_md
 	for db in $dblist; do
-		/bin/nice -n 19 mysqldump -u root -p$mysql_pass --skip-opt --quick --set-charset --disable-keys --extended-insert --create-options --add-drop-table $db > $path_md/$db.sql
+		nice -n 19 mysqldump -u root -p$mysql_pass --skip-opt --quick --set-charset --disable-keys --extended-insert --create-options --add-drop-table $db > $path_md/$db.sql
 		if [ "$mysql_dump_gz" == "1" ]; then
 			gzip --fast $path_md/$db.sql
 		fi
@@ -286,7 +286,7 @@ irsync_local() {
 	mkdir -p $backup_storage/$lohost.full
 	mkdir -p $backup_storage/$lohost.snaps
 
-	/bin/nice -n 19 rsync -qaHx --timeout=600 --ignore-errors --numeric-ids --delete --exclude-from="$exclude_file" --delete-excluded $backup_paths $backup_storage/$lohost.full >> /dev/null 2>&1
+	nice -n 19 rsync -qaHx --timeout=600 --ignore-errors --numeric-ids --delete --exclude-from="$exclude_file" --delete-excluded $backup_paths $backup_storage/$lohost.full >> /dev/null 2>&1
 	touch -m $backup_storage/$lohost.full
 	cp -al $backup_storage/$lohost.full $backup_storage/$lohost.snaps/$dstamp
 	tdate=`date +"%Y%m%d%H%M"`
@@ -308,7 +308,7 @@ irsync_remote() {
 
 	ssh -p $ssh_port -i $ssh_key -o Compression=no -o StrictHostKeyChecking=no -x $ssh_user@$backup_host "mkdir -p $backup_storage/$lohost.full"
 	ssh -p $ssh_port -i $ssh_key -o Compression=no -o StrictHostKeyChecking=no -x $ssh_user@$backup_host "mkdir -p $backup_storage/$lohost.snaps"
-	/bin/nice -n 19 rsync -qaHx --timeout=600 --ignore-errors --numeric-ids --delete --exclude-from="$exclude_file" --delete-excluded \
+	nice -n 19 rsync -qaHx --timeout=600 --ignore-errors --numeric-ids --delete --exclude-from="$exclude_file" --delete-excluded \
         -e "ssh -p $ssh_port -i $ssh_key -c arcfour -o Compression=no -o StrictHostKeyChecking=no -x" \
         $backup_paths $ssh_user@$backup_host:$backup_storage/$lohost.full >> /dev/null 2>&1
 
